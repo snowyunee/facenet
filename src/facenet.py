@@ -110,7 +110,7 @@ def read_images_from_disk(input_queue):
     """
     label = input_queue[1]
     file_contents = tf.read_file(input_queue[0])
-    example = tf.image.decode_png(file_contents, channels=3)
+    example = tf.image.decode_image(file_contents, channels=3)
     return example, label
   
 def random_rotate_image(image):
@@ -433,8 +433,8 @@ def calculate_roc(thresholds, embeddings1, embeddings2, actual_issame, nrof_fold
             tprs[fold_idx,threshold_idx], fprs[fold_idx,threshold_idx], _ = calculate_accuracy(threshold, dist[test_set], actual_issame[test_set])
         _, _, accuracy[fold_idx] = calculate_accuracy(thresholds[best_threshold_index], dist[test_set], actual_issame[test_set])
           
-        tpr = np.mean(tprs,0)
-        fpr = np.mean(fprs,0)
+    tpr = np.mean(tprs,0)
+    fpr = np.mean(fprs,0)
     return tpr, fpr, accuracy
 
 def calculate_accuracy(threshold, dist, actual_issame):
