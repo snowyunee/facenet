@@ -52,13 +52,14 @@ def main(args):
         images[i] = misc.imread(os.path.expanduser(args.image_files[i]))
 
     # Run forward pass to calculate embeddings
-    emb = face_recognizer.predict(images)
+    emb, names, aligned_images = face_recognizer.predict(images)
+    print(names)
     
-    nrof_images = len(args.image_files)
+    nrof_images = len(names)
 
     print('Images:')
     for i in range(nrof_images):
-        print('%1d: %s' % (i, args.image_files[i]))
+        print('%1d: %s' % (i, names[i]))
     print('')
     
     # Print distance matrix
@@ -67,11 +68,19 @@ def main(args):
     for i in range(nrof_images):
         print('    %1d     ' % i, end='')
     print('')
+
+    os.mkdir("./distance/")
+    os.mkdir("./aligned/")
     for i in range(nrof_images):
         print('%1d  ' % i, end='')
+        dir_name = "./distance/" + str(i)
+        os.mkdir(dir_name)
+        misc.imsave("./aligned/" + str(i)+ ".jpg", aligned_images[i])
         for j in range(nrof_images):
             dist = np.sqrt(np.sum(np.square(np.subtract(emb[i,:], emb[j,:]))))
             print('  %1.4f  ' % dist, end='')
+            file_name = '{:4f}'.format(dist)
+            misc.imsave(dir_name + "/" + file_name + ".jpg", aligned_images[j])
         print('')
             
             
