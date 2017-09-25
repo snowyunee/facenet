@@ -5,10 +5,12 @@ from scipy import misc
 import logging
 import numpy as np
 import tensorflow as tf
+import collections
 
 from PIL import Image, ImageOps
 
 import align.detect_face
+
 
 class FaceRecognizer(object):
   def __init__(self, config):
@@ -20,14 +22,57 @@ class FaceRecognizer(object):
     self._mtcnn   = self._load_mtcnn()
     print('load_complete')
 
-  def predict(self, images):
-    images, names, aligned_images = self._preprocessing(images)
+  def predict(self, preprocessed_images):
     feed_dict = {
-            self._facenet['input'] : images,
+            self._facenet['input'] : preprocessed_images,
             self._facenet['phase_train'] :  False
             }
-    output = self._facenet['sess'].run(self._facenet['output'], feed_dict=feed_dict)
-    return output, names, aligned_images
+    embs = self._facenet['sess'].run(self._facenet['output'], feed_dict=feed_dict)
+    return embs
+
+  def preprocessing(self, images):
+    print('preprocessing')
+    minsize = 20 # minimum size of face
+    threshold = [ 0.6, 0.7, 0.7 ]  # three steps's threshold
+    factor = 0.709 # scale factor
+
+    nrof_samples = len(images)
+    img_list = []
+    result = []
+    for i in range(nrof_samples):
+        #img = misc.imread(os.path.expanduser(image_paths[i]))
+        img = images[i]
+        img_size = np.asarray(img.shape)[0:2]
+        bounding_boxes, _ = align.detect_face.detect_face(img[:,:,0:3], minsize,
+                                                          self._mtcnn['pnet'],
+                                                          self._mtcnn['rnet'],
+                                                          self._mtcnn['onet'],
+                                                          threshold, factor)
+        # print(">> {} bounding_boxes ---------------------".format(i))
+        # print(bounding_boxes)
+        # print("<< bounding_boxes ---------------------")
+        per_image = []
+        for bb_idx in range(bounding_boxes.shape[0]):
+            det = np.squeeze(bounding_boxes[bb_idx,0:4])
+            # print(">> {} det ---------------------".format(bb_idx))
+            # print(det)
+            # print("<< det ---------------------")
+            bb = np.zeros(4, dtype=np.int32)
+            bb[0] = np.maximum(det[0]-self._config['margin']/2, 0)
+            bb[1] = np.maximum(det[1]-self._config['margin']/2, 0)
+            bb[2] = np.minimum(det[2]+self._config['margin']/2, img_size[1])
+            bb[3] = np.minimum(det[3]+self._config['margin']/2, img_size[0])
+            cropped = img[bb[1]:bb[3],bb[0]:bb[2],0:3]
+            aligned = misc.imresize(cropped,
+                                   (self._config['image_size'], self._config['image_size']),
+                                   interp='bilinear')
+            prewhitened = self._prewhiten(aligned)
+            # aligned 는 테스트를 위해 일단 넣어둔다.
+            per_image.append((bb, aligned, prewhitened))
+
+        result.append(per_image)
+
+    return result
 
 
   def _load_facenet(self, config):
@@ -76,56 +121,6 @@ class FaceRecognizer(object):
     mtcnn['onet'] = onet
     return mtcnn
 
-
-  def _preprocessing(self, images):
-    minsize = 20 # minimum size of face
-    threshold = [ 0.6, 0.7, 0.7 ]  # three steps's threshold
-    factor = 0.709 # scale factor
-
-    nrof_samples = len(images)
-    #img_list = [None] * nrof_samples
-    img_list = []
-    img_name_list = []
-    aligned_origin_img_list = []
-    idx = 0
-    for i in range(nrof_samples):
-        #img = misc.imread(os.path.expanduser(image_paths[i]))
-        img = images[i]
-        img_size = np.asarray(img.shape)[0:2]
-        bounding_boxes, _ = align.detect_face.detect_face(img[:,:,0:3], minsize,
-                                                          self._mtcnn['pnet'],
-                                                          self._mtcnn['rnet'],
-                                                          self._mtcnn['onet'],
-                                                          threshold, factor)
-        # print(">> {} bounding_boxes ---------------------".format(i))
-        # print(bounding_boxes)
-        # print("<< bounding_boxes ---------------------")
-        for bb_idx in range(bounding_boxes.shape[0]):
-            det = np.squeeze(bounding_boxes[bb_idx,0:4])
-            # print(">> {} det ---------------------".format(bb_idx))
-            # print(det)
-            # print("<< det ---------------------")
-            bb = np.zeros(4, dtype=np.int32)
-            bb[0] = np.maximum(det[0]-self._config['margin']/2, 0)
-            bb[1] = np.maximum(det[1]-self._config['margin']/2, 0)
-            bb[2] = np.minimum(det[2]+self._config['margin']/2, img_size[1])
-            bb[3] = np.minimum(det[3]+self._config['margin']/2, img_size[0])
-            cropped = img[bb[1]:bb[3],bb[0]:bb[2],0:3]
-            aligned = misc.imresize(cropped,
-                                   (self._config['image_size'], self._config['image_size']),
-                                   interp='bilinear')
-            name = str(idx) + ".jpg"
-            #misc.imsave("./aligned/" + name, aligned)
-            idx = idx + 1
-
-            img_name_list.append(name)
-            aligned_origin_img_list.append(aligned)
-            prewhitened = self._prewhiten(aligned)
-            img_list.append(prewhitened)
-
-    images = np.stack(img_list)
-
-    return images, img_name_list, aligned_origin_img_list
 
   def _prewhiten(self, x):
     mean = np.mean(x)
