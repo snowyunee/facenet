@@ -36,6 +36,7 @@ import glob
 import itertools
 import csv
 from functools import partial
+from PIL import Image
 
 import nets
 import codecs
@@ -64,14 +65,14 @@ def load_images(files):
 
   return images, image_files
 
-def write_file_list(name, file_list):
-  with open(name, "w") as pf:
+def csv_write(file_name, l):
+  with open(file_name, "a") as pf:
     # BOM
     pf.write(u'\ufeff')
 
     writer = csv.writer(pf)
-    for idx, name in enumerate(file_list):
-      writer.writerow([idx, name])
+    for v in l:
+      writer.writerow(v)
 
 def grouper(iterable, n, fillvalue=None):
   "Collect data into fixed-length chunks or blocks"
@@ -81,10 +82,10 @@ def grouper(iterable, n, fillvalue=None):
 
 # non lazy function
 def predict_list(face_recognizer, l):
-  file_names, preprocessed_images = zip(*l)
-  bbs, aligneds, prewhiteneds = zip(*preprocessed_images)
+  file_names, origin_imgs, preprocessed_images = zip(*l)
+  bbs, aligneds, croppeds, prewhiteneds = zip(*preprocessed_images)
   embs = face_recognizer.predict(prewhiteneds)
-  return zip(file_names, preprocessed_images, bbs, aligneds, embs)
+  return zip(file_names, origin_imgs, preprocessed_images, bbs, aligneds, croppeds, embs)
 
 
 def main(args):
@@ -95,11 +96,11 @@ def main(args):
   print(args)
 
   # out dir 지우고 새로 만듦
-  shutil.rmtree(args.out_dir)
+  if os.path.exists(args.out_dir): shutil.rmtree(args.out_dir)
   os.mkdir(args.out_dir)
 
   files = load_image_file_list(args.anchor, args.in_dir)
-  write_file_list(args.out_dir + "/image_files.csv", files)
+  csv_write(args.out_dir + "/image_files.csv", files)
 
   net_config = {
           'face_recognizer_model' : args.model,
@@ -109,51 +110,55 @@ def main(args):
   face_recognizer = nets.FaceRecognizer(net_config)
 
   # Run forward pass to calculate embeddings
-  images = map(misc.imread, files)
+  # => [img, img, ...]
+  # l = map(misc.imread, files)
+  origin_images = map(Image.open, files)
+
+  # rotate 0, 120, 240
+  # => [[img, rotated_img, ...], [img, rotated_img, ...], ...]
+  rotated_images = itertools.chain.from_iterable(itertools.starmap(lambda f_name, img:  \
+                         [(f_name, np.array(img)), \
+                          (f_name, np.array(img.copy().rotate(120, expand=True))), \
+                          (f_name, np.array(img.copy().rotate(240, expand=True)))],
+                       zip(files, origin_images)))
 
   # list of list : many faces per image
-  # [ image             , image       , image, image , ... ] => 
-  # [ [face, face, face], [face, face], []   , [face], ... ]
-  preprocessed_images = itertools.chain.from_iterable(
-          map(face_recognizer.preprocessing, grouper(images, 2)))
+  # => [ [(origin_img, face), ...], [], [], 
+  #      ... ]
+  l = itertools.chain.from_iterable(itertools.starmap(lambda f_name, img: \
+          zip(itertools.repeat(f_name), \
+              itertools.repeat(img), \
+              itertools.chain.from_iterable(face_recognizer.preprocessing([img]))),
+          rotated_images))
 
-  # [ (file_name, [face, face, face]), (file_name, [face, face]), ... ]
-  r = zip(files, preprocessed_images)
-
-  # [ (file_name, face), (file_name, face), ... ]
-  r = itertools.chain.from_iterable(itertools.starmap(
-        lambda f_name, images: zip(itertools.repeat(f_name), images),
-        r))
-
-  # [ (file_name, face), (file_name face), ... ] => 
-  # [ face, face, ... ]
+  # [ (file_name, origin_img, ...), ... ]
   embed_list = itertools.chain.from_iterable(
-          map(partial(predict_list, face_recognizer), grouper(r, 2))) 
-
-
-  # 결과 저장을 위한 디렉토리 생성.
-  aligned_img_dir = "./aligned/"
-  if os.path.exists(aligned_img_dir): shutil.rmtree(aligned_img_dir)
-  os.mkdir(aligned_img_dir)
+          map(partial(predict_list, face_recognizer), grouper(l, 8))) 
 
   # 결과 저장.
-  _, _, _, _, anchor_emb = next(embed_list)
-  for i, (name, preprocessed_image, bb, aligned, emb) in enumerate(embed_list):
-      if name == None: break
-      print(name, ", ", ', bb:', bb)
-
+  emb_result = []
+  #emb_result.append('file', 'bb[0]', 'bb[1]', 'bb[2]', 'bb[3]')
+  (name, origin, preprocessed_image, bb, cropped, aligned, emb) = next(embed_list)
+  _, file_name = os.path.split(name)
+  anchor_emb = emb
+  r = [file_name] + list(itertools.chain.from_iterable([emb, bb, [0]]))
+  print(r)
+  emb_result.append(r)
+  for i, (name, origin, preprocessed_image, bb, cropped, aligned, emb) in enumerate(embed_list):
+      _, file_name = os.path.split(name)
+      # print('name: {}, bb:{}'.format(name, bb))
       dist = np.sqrt(np.sum(np.square(np.subtract(anchor_emb, emb))))
-      print('  %1.4f  ' % dist, end='')
-      file_name = '{:4f}'.format(dist)
-      #head, tail = os.path.split(name)
-      misc.imsave(aligned_img_dir + "/" + str(dist) + ".jpg", aligned)
+      #misc.imsave('{}/{:4f}_{}.jpg'.format(aligned_img_dir, dist, i), aligned)
+      misc.imsave('{}/dist_{}_{}_{}.jpg'.format(args.out_dir, dist, file_name, i), aligned)
+      misc.imsave('{}/aligned_{}_{}.jpg'.format(args.out_dir, file_name, i), aligned)
+      misc.imsave('{}/cropped_{}_{}.jpg'.format(args.out_dir, file_name, i), cropped)
+      misc.imsave('{}/origin_{}_{}.jpg'.format(args.out_dir, file_name, i), origin)
 
-  # # Print distance matrix
-  # print('Distance matrix')
-  # print('    ', end='')
-  # for i in range(nrof_images):
-  #     print('    %1d     ' % i, end='')
-  # print('')
+      r = [file_name] + list(itertools.chain.from_iterable([emb, bb, [dist]]))
+      emb_result.append(r)
+
+  csv_write(args.out_dir + "/emb_result.csv", emb_result)
+
 
             
 
@@ -168,7 +173,7 @@ def parse_arguments(argv):
     parser.add_argument('--image_size', type=int,
         help='Image size (height, width) in pixels.', default=160)
     parser.add_argument('--margin', type=int,
-        help='Margin for the crop around the bounding box (height, width) in pixels.', default=4)
+        help='Margin for the crop around the bounding box (height, width) in pixels.', default=0)
     parser.add_argument('--gpu_memory_fraction', type=float,
         help='Upper bound on the amount of GPU memory that will be used by the process.', default=1.0)
     return parser.parse_args(argv)
