@@ -27,15 +27,18 @@ class FaceRecognizer(object):
     print('load_complete')
 
   def predict(self, preprocessed_images):
+    start = time.clock()
     feed_dict = {
             self._facenet['input'] : preprocessed_images,
             self._facenet['phase_train'] :  False
             }
     embs = self._facenet['sess'].run(self._facenet['output'], feed_dict=feed_dict)
+    end = time.clock()
+    elapsed = end - start
+    print('------------------- predict, spent:', elapsed, ", size:", len(preprocessed_images))
     return embs
 
   def preprocessing(self, images):
-    print('------------------- preprocessing')
     minsize = 20 # minimum size of face
     threshold = [ 0.6, 0.7, 0.7 ]  # three steps's threshold
     factor = 0.709 # scale factor
@@ -44,6 +47,7 @@ class FaceRecognizer(object):
     img_list = []
     result = []
     for i in range(nrof_samples):
+        start = time.clock()
         #img = misc.imread(os.path.expanduser(image_paths[i]))
         img = images[i]
         img_size = np.asarray(img.shape)[0:2]
@@ -64,12 +68,18 @@ class FaceRecognizer(object):
             # print(bb_idx, det)
             # print("<< det ---------------------")
             bb = np.zeros(4, dtype=np.int32)
-            margin = self._config['margin']
-            bb[0] = np.maximum(det[0]-margin/2, 0)
-            bb[1] = np.maximum(det[1]-margin/2, 0)
-            bb[2] = np.minimum(det[2]+margin/2, img_size[1])
-            bb[3] = np.minimum(det[3]+margin/2, img_size[0])
-            cropped = img[bb[1]:bb[3],bb[0]:bb[2],0:3]
+            #margin = self._config['margin']
+            margin = max(det[2]-det[0],  det[3]-det[1])
+            bb[0] = np.maximum(det[0], 0)
+            bb[1] = np.maximum(det[1], 0)
+            bb[2] = np.minimum(det[2], img_size[1])
+            bb[3] = np.minimum(det[3], img_size[0])
+            cbb = np.zeros(4, dtype=np.int32)
+            cbb[0] = np.maximum(det[0]-margin/2, 0)
+            cbb[1] = np.maximum(det[1]-margin/2, 0)
+            cbb[2] = np.minimum(det[2]+margin/2, img_size[1])
+            cbb[3] = np.minimum(det[3]+margin/2, img_size[0])
+            cropped = img[cbb[1]:cbb[3],cbb[0]:cbb[2],0:3]
             image_size = self._config['image_size']
 
             # keypoints = landmarks[bb_idx]
@@ -85,7 +95,7 @@ class FaceRecognizer(object):
             try:
               aligned = self._align_face(cropped, image_size,
                                          landmarks[bb_idx],
-                                         origin = [bb[0], bb[1]])
+                                         origin = [cbb[0], cbb[1]])
             except: 
               print("fail to align face")
               continue
@@ -94,6 +104,9 @@ class FaceRecognizer(object):
             # aligned 는 테스트를 위해 일단 넣어둔다.
             per_image.append((bb, cropped, aligned, prewhitened))
 
+        end = time.clock()
+        elapsed = end - start
+        print('------------------- preprocessing, spent:', elapsed, ", size:", img_size)
         result.append(per_image)
 
     return result
