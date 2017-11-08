@@ -37,35 +37,17 @@ import itertools
 import csv
 from functools import partial
 from PIL import Image
+from PIL import ImageDraw
 
 import nets
 import codecs
             
-def load_image_file_list(anchor_path, dir_path):
-  image_files = []
-
-  # 비교 기준 얼굴 이미지를 맨 앞에 넣는다.
-  image_files.insert(0, anchor_path)
-
-  # 이미지 파일 목록을 얻는다.
-  exts = ['.jpg', '.png']
+def _load_image_file_list(anchor_path, dir_path):
   files = glob.glob("{}/**/*".format(dir_path), recursive=True)
-  for f in files:
-    _, ext = os.path.splitext(f.lower())
-    if ext in exts:
-      image_files.append(f)
-
-  return image_files
+  return [anchor_path] + files
 
 
-def load_images(files):
-  images = [None] * len(image_files)
-  for i in range(len(image_files)):
-      images[i] = misc.imread(os.path.expanduser(args.image_files[i]))
-
-  return images, image_files
-
-def csv_write(file_name, l):
+def _csv_write(file_name, l):
   with open(file_name, "a") as pf:
     # BOM
     pf.write(u'\ufeff')
@@ -74,18 +56,69 @@ def csv_write(file_name, l):
     for v in l:
       writer.writerow(v)
 
-def grouper(iterable, n, fillvalue=None):
+def _grouper(iterable, n, fillvalue=None):
   "Collect data into fixed-length chunks or blocks"
   # grouper('ABCDEFG', 3, 'x') --> ABC DEF Gxx"
   args = [iter(iterable)] * n
-  return zip(*args)
+  return itertools.zip_longest(*args)
 
-# non lazy function
-def predict_list(face_recognizer, l):
-  file_names, origin_imgs, preprocessed_images = zip(*l)
-  bbs, aligneds, croppeds, prewhiteneds = zip(*preprocessed_images)
-  embs = face_recognizer.predict(prewhiteneds)
-  return zip(file_names, origin_imgs, preprocessed_images, bbs, aligneds, croppeds, embs)
+def _resize_1024(img):
+  m = max(img.size[0], img.size[1])
+  if m > 1024:
+    x = int(float(img.size[0]) * (1024.0/float(m)))
+    y = int(float(img.size[1]) * (1024.0/float(m)))
+    return img.resize((x, y), resample=Image.LANCZOS)
+  return img
+
+def _rotate(image, angle):
+  image_pil = Image.fromarray(np.uint8(image)).convert('RGB')
+  image_pil = image_pil.rotate(angle, resample=Image.BILINEAR, expand=True)
+  return np.array(image_pil)
+
+def _draw_rectangle(image, bbs):
+  draw = ImageDraw.Draw(image)
+  for bb in bbs:
+    draw.rectangle(bb.tolist(), fill='red', outline='red')
+
+def _draw_rectangle_from_array(image, bbs):
+  image_pil = Image.fromarray(np.uint8(image)).convert('RGB')
+  _draw_rectangle(image_pil, bbs)
+  np.copyto(image, np.array(image_pil))
+
+def _open(path):
+  try:
+    print(path)
+    return Image.open(path)
+  except:
+    return None
+
+# return shape : (len(images), len(angels))
+def _preprocessing(face_recognizer, images):
+  angles = [0, 120, 120]
+
+  # rotated_images = []
+  results = [[[] for _ in range(len(angles)) ] for _ in range(len(images)) ]
+  print(results)
+  for i, angle in enumerate(angles):
+
+    # rotate
+    images = [_rotate(img, angle) for img in images if img is not None]
+
+    # preprocessing
+    preprocessed_list = face_recognizer.preprocessing(images)
+
+    # 얼굴 영역 칠함 다음에 rotate 시켜도 중복으로 얼굴이 detect 되지 않도록
+    for img, preprocessed in zip(images, preprocessed_list):
+      if len(preprocessed) is 0: continue
+      bbs, _, _, _ = zip(*preprocessed)
+      _draw_rectangle_from_array(img, bbs)
+
+    # 결과 저장
+    # rotated_images.append(images)
+    for j, p in enumerate(preprocessed_list):
+      results[j][i] = p
+
+  return results, np.array([0,120,240]*len(images)).reshape(-1,3)
 
 
 def main(args):
@@ -99,8 +132,8 @@ def main(args):
   if os.path.exists(args.out_dir): shutil.rmtree(args.out_dir)
   os.mkdir(args.out_dir)
 
-  files = load_image_file_list(args.anchor, args.in_dir)
-  csv_write(args.out_dir + "/image_files.csv", files)
+  files = _load_image_file_list(args.anchor, args.in_dir)
+  _csv_write(args.out_dir + "/image_files.csv", files)
 
   net_config = {
           'face_recognizer_model' : args.model,
@@ -109,56 +142,60 @@ def main(args):
           }
   face_recognizer = nets.FaceRecognizer(net_config)
 
-  # Run forward pass to calculate embeddings
-  # => [img, img, ...]
-  # l = map(misc.imread, files)
-  origin_images = map(Image.open, files)
 
-  # rotate 0, 120, 240
-  # => [[img, rotated_img, ...], [img, rotated_img, ...], ...]
-  rotated_images = itertools.chain.from_iterable(itertools.starmap(lambda f_name, img:  \
-                         [(f_name, np.array(img)), \
-                          (f_name, np.array(img.copy().rotate(120, expand=True))), \
-                          (f_name, np.array(img.copy().rotate(240, expand=True)))],
-                       zip(files, origin_images)))
+  batch_size = 1
 
-  # list of list : many faces per image
-  # => [ [(origin_img, face), ...], [], [], 
-  #      ... ]
-  l = itertools.chain.from_iterable(itertools.starmap(lambda f_name, img: \
-          zip(itertools.repeat(f_name), \
-              itertools.repeat(img), \
-              itertools.chain.from_iterable(face_recognizer.preprocessing([img]))),
-          rotated_images))
+  for file_list in _grouper(files, batch_size):
 
-  # [ (file_name, origin_img, ...), ... ]
-  embed_list = itertools.chain.from_iterable(
-          map(partial(predict_list, face_recognizer), grouper(l, 8))) 
+    origin_images = [_open(f) for f in file_list if f is not None]
 
-  # 결과 저장.
-  emb_result = []
-  #emb_result.append('file', 'bb[0]', 'bb[1]', 'bb[2]', 'bb[3]')
-  (name, origin, preprocessed_image, bb, cropped, aligned, emb) = next(embed_list)
-  _, file_name = os.path.split(name)
-  anchor_emb = emb
-  r = [file_name] + list(itertools.chain.from_iterable([emb, bb, [0]]))
-  print(r)
-  emb_result.append(r)
-  for i, (name, origin, preprocessed_image, bb, cropped, aligned, emb) in enumerate(embed_list):
-      _, file_name = os.path.split(name)
-      # print('name: {}, bb:{}'.format(name, bb))
+    # remove none image files
+    tmp = [(f, img) for f, img in zip(file_list, origin_images) if img is not None]
+    if len(tmp) is 0: continue
+    file_list, origin_images = zip(*tmp)
+
+    # resize
+    origin_images = [np.array(_resize_1024(img)) for img in origin_images]
+
+    # rotate and preprocessing
+    preprocessed_list, angles = _preprocessing(face_recognizer, origin_images)
+
+    # flatten preprocessed
+    l = list(itertools.chain.from_iterable(
+        itertools.starmap(lambda f, o, a, p:
+          zip(itertools.repeat(f), itertools.repeat(o), a, p),
+        zip(file_list, origin_images, angles, preprocessed_list))))
+
+    l = list(itertools.chain.from_iterable(
+        itertools.starmap(lambda f, o, a, p:
+          zip(itertools.repeat(f), itertools.repeat(o), itertools.repeat(a), p),
+        l)))
+
+    if len(l) is 0: continue
+    _, _, _, preprocesses = zip(*l)
+    if len(preprocesses) is 0: continue
+    _, _, _, prewhitened_images = zip(*preprocesses)
+
+    # predict : get embedding
+    embs = face_recognizer.predict(prewhitened_images)
+  
+    anchor_emb = None
+    for i, (v, emb) in enumerate(zip(l, embs)):
+      f_name, origin, angle, preprocessed = v
+      bb, cropped, aligned, prewhitened = preprocessed
+
+      _, file_name = os.path.split(f_name)
+
+      if anchor_emb is None: anchor_emb = emb
+
+      misc.imsave('{}/origin_{}_{}.jpg'.format(args.out_dir, file_name, i), origin)
+      print('------- name: {}, bb:{}, img_size:{}'.format(file_name, bb, origin.size))
+
       dist = np.sqrt(np.sum(np.square(np.subtract(anchor_emb, emb))))
-      #misc.imsave('{}/{:4f}_{}.jpg'.format(aligned_img_dir, dist, i), aligned)
-      misc.imsave('{}/dist_{}_{}_{}.jpg'.format(args.out_dir, dist, file_name, i), aligned)
+      misc.imsave('{}/dist_{:0.4f}_{}_{}.jpg'.format(args.out_dir, dist, file_name, i), aligned)
       misc.imsave('{}/aligned_{}_{}.jpg'.format(args.out_dir, file_name, i), aligned)
       misc.imsave('{}/cropped_{}_{}.jpg'.format(args.out_dir, file_name, i), cropped)
-      misc.imsave('{}/origin_{}_{}.jpg'.format(args.out_dir, file_name, i), origin)
-
-      r = [file_name] + list(itertools.chain.from_iterable([emb, bb, [dist]]))
-      emb_result.append(r)
-
-  csv_write(args.out_dir + "/emb_result.csv", emb_result)
-
+    
 
             
 
